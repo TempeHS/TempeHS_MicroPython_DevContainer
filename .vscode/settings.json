@@ -24,5 +24,13 @@
     "~/.micropico-stubs/included",
     "./examples/smooth_"
   ],
-  "micropico.syncFolder": "project"
+  "micropico.syncFolder": "project",
+	"workbench.colorTheme": "Default Dark+",
+	"workbench.iconTheme": "vscode-icons",
+	"github.copilot.enable": {
+		"python": false,
+		"html": false,
+		"css": false,
+		"SQL": false
+	}
 }
