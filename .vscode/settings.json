@@ -32,5 +32,6 @@
 		"html": false,
 		"css": false,
 		"SQL": false
-	}
+	},
+  "chat.agent.enabled": false
 }
