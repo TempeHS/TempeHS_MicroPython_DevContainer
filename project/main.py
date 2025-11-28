@@ -128,12 +128,39 @@ def parse_location_from_args(error):
     if not args:
         return None, None
     for arg in args:
-        if isinstance(arg, tuple) and len(arg) >= 2 and isinstance(arg[1], int):
-            potential_filename = arg[0] if isinstance(arg[0], str) else None
-            return potential_filename, arg[1]
+        if isinstance(arg, tuple):
+            if len(arg) >= 2 and isinstance(arg[1], int):
+                potential_filename = arg[0] if isinstance(arg[0], str) else None
+                return potential_filename, arg[1]
+            # MicroPython SyntaxError uses (message, (filename, line, column, source))
+            if (
+                len(arg) >= 2
+                and isinstance(arg[0], str)
+                and isinstance(arg[1], tuple)
+                and len(arg[1]) >= 2
+                and isinstance(arg[1][0], str)
+                and isinstance(arg[1][1], int)
+            ):
+                return arg[1][0], arg[1][1]
         if isinstance(arg, int):
             return None, arg
     return None, None
+
+
+def get_syntax_error_details(error):
+    if not isinstance(error, SyntaxError):
+        return None, None, None, None
+    args = getattr(error, "args", None)
+    if not args or len(args) < 2:
+        return None, None, None, None
+    details = args[1]
+    if not isinstance(details, tuple) or len(details) < 4:
+        return None, None, None, None
+    filename = details[0] if isinstance(details[0], str) else None
+    line_no = details[1] if isinstance(details[1], int) else None
+    column = details[2] if isinstance(details[2], int) else None
+    source_line = details[3] if isinstance(details[3], str) else None
+    return filename, line_no, column, source_line
 
 
 def get_error_location(error):
@@ -144,7 +171,7 @@ def get_error_location(error):
     return filename, line_no
 
 
-def print_code_context(error, context_radius=CONTEXT_RADIUS, override_location=None):
+def print_code_context(error, context_radius=CONTEXT_RADIUS, override_location=None, trace_frames=None):
     if override_location:
         filename, line_no = override_location
     else:
@@ -160,23 +187,61 @@ def print_code_context(error, context_radius=CONTEXT_RADIUS, override_location=N
         resolved_filename = get_script_path()
         lines, resolved_path = load_source_lines(resolved_filename)
     if not lines:
-        fallback_path = get_script_path()
-        fallback_lines, fallback_resolved = load_source_lines(fallback_path)
-        if fallback_lines:
-            print("--- Code Context ---")
-            print(
-                "Unable to open {}. Showing context from {} instead.".format(
-                    resolved_filename or "dynamic source", fallback_path
-                )
-            )
-            lines = fallback_lines
-            resolved_path = fallback_resolved or fallback_path
-            fallback_display = True
-        else:
-            path_to_show = resolved_path or resolved_filename or fallback_path
-            print("--- Code Context ---")
-            print("Unable to open {} to display source context.".format(path_to_show))
+        syntax_filename, syntax_line, syntax_column, syntax_source = get_syntax_error_details(error)
+        if syntax_source:
+            target_filename = resolved_filename or syntax_filename or "dynamic source"
+            target_line = line_no or syntax_line or "?"
+            line_label_value = syntax_line or line_no
+            if isinstance(line_label_value, int) and line_label_value >= 0:
+                line_label = "{:03}".format(line_label_value)
+            else:
+                line_label = "???"
+            prefix = ">> {}: ".format(line_label)
+            print("--- Code Context ({}:{}) ---".format(target_filename, target_line))
+            print("{}{}".format(prefix, syntax_source.rstrip("\n")))
+            if isinstance(syntax_column, int) and syntax_column > 0:
+                caret_padding = " " * (len(prefix) + syntax_column - 1)
+                print("{}^".format(caret_padding))
             return
+        if trace_frames:
+            for idx in range(len(trace_frames) - 1, -1, -1):
+                alt_filename, alt_line = trace_frames[idx]
+                if not alt_filename:
+                    continue
+                if resolved_filename and alt_filename == resolved_filename:
+                    continue
+                alt_lines, alt_resolved = load_source_lines(alt_filename)
+                if alt_lines:
+                    print("--- Code Context ---")
+                    print(
+                        "Unable to open {}. Showing context from {} instead.".format(
+                            resolved_filename or "dynamic source", alt_resolved or alt_filename
+                        )
+                    )
+                    lines = alt_lines
+                    resolved_path = alt_resolved or alt_filename
+                    if isinstance(alt_line, int) and alt_line > 0:
+                        line_no = alt_line
+                    fallback_display = True
+                    break
+        if not lines:
+            fallback_path = get_script_path()
+            fallback_lines, fallback_resolved = load_source_lines(fallback_path)
+            if fallback_lines:
+                print("--- Code Context ---")
+                print(
+                    "Unable to open {}. Showing context from {} instead.".format(
+                        resolved_filename or "dynamic source", fallback_path
+                    )
+                )
+                lines = fallback_lines
+                resolved_path = fallback_resolved or fallback_path
+                fallback_display = True
+            else:
+                path_to_show = resolved_path or resolved_filename or fallback_path
+                print("--- Code Context ---")
+                print("Unable to open {} to display source context.".format(path_to_show))
+                return
     path_to_show = resolved_path or resolved_filename or get_script_path()
     total_lines = len(lines)
     if total_lines == 0:
@@ -224,33 +289,38 @@ def capture_trace_text(error):
         buf.close()
 
 
-def parse_location_from_trace_text(trace_text):
-    if not trace_text:
-        return None, None
+def extract_traceback_frames(trace_text):
     frames = []
+    if not trace_text:
+        return frames
     for raw_line in trace_text.splitlines():
         line = raw_line.strip()
-        if line.startswith('File "') and ", line " in line:
-            frames.append(line)
-    if not frames:
-        return None, None
-    for entry in reversed(frames):
-        start = entry.find('"') + 1
-        end = entry.find('"', start)
+        if not (line.startswith('File "') and ", line " in line):
+            continue
+        start = line.find('"') + 1
+        end = line.find('"', start)
         if start <= 0 or end <= start:
             continue
-        filename = entry[start:end]
+        filename = line[start:end]
         line_marker = ", line "
-        line_index = entry.find(line_marker, end)
+        line_index = line.find(line_marker, end)
         if line_index == -1:
+            frames.append((filename, None))
             continue
         line_index += len(line_marker)
-        remainder = entry[line_index:]
+        remainder = line[line_index:]
         try:
             line_no = int(remainder.split(',', 1)[0].strip())
         except ValueError:
             line_no = None
-        return filename, line_no
+        frames.append((filename, line_no))
+    return frames
+
+
+def parse_location_from_trace_text(trace_text):
+    frames = extract_traceback_frames(trace_text)
+    if frames:
+        return frames[-1]
     return None, None
 
 
@@ -312,7 +382,8 @@ def handle_exception(title, error):
         print_available_files()
     filename, line_no = get_error_location(error)
     trace_text = capture_trace_text(error)
-    parsed_filename, parsed_line = parse_location_from_trace_text(trace_text)
+    trace_frames = extract_traceback_frames(trace_text)
+    parsed_filename, parsed_line = (trace_frames[-1] if trace_frames else (None, None))
     if parsed_filename or parsed_line:
         use_parsed = False
         if not filename and not line_no:
@@ -334,7 +405,7 @@ def handle_exception(title, error):
     if filename or line_no:
         print("Location: {}:{}".format(filename or "unknown", line_no or "?"))
     print("Timestamp: {}".format(utime.localtime() if hasattr(utime, "localtime") else "unknown"))
-    print_code_context(error, override_location=(filename, line_no))
+    print_code_context(error, override_location=(filename, line_no), trace_frames=trace_frames)
     print("--- Traceback ---")
     sys.stdout.write(trace_text)
     log_exception(title, error, trace_text, location_override=(filename, line_no))
