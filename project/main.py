@@ -56,12 +56,10 @@ ERROR_GUIDANCE = {
     ],
     "OS ERROR": [
         "This is a system error catch all.",
-        "You may want to check the error code or take this error to your teacher.",
         "Next step: Note the error code, verify any file paths, and retry after checking the hardware connections.",
     ],
     "RUNTIME ERROR": [
         "This is a runtime catch all error.",
-        "You may want to check the error code or take this error to your teacher.",
         "Next step: Use the code context and traceback to narrow down what ran just before the crash.",
     ],
     "UNEXPECTED ERROR": [
